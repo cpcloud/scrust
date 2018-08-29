@@ -1,0 +1,7 @@
+[package]
+name = "scrust"
+version = "0.1.0"
+authors = ["Phillip Cloud <cpcloud@gmail.com>"]
+
+[dependencies]
+maplit = '*'
