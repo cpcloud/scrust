@@ -1,8 +1,8 @@
 #![feature(box_syntax, fn_traits, unboxed_closures, box_patterns)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::rc::Rc;
+use std::ops::{Add, Div, Mul, Sub};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum SpecialForm {
@@ -29,17 +29,17 @@ impl fmt::Display for SpecialForm {
     }
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum List {
     Cell(Box<Value>, Box<List>),
     Null,
 }
 
 impl List {
-    fn car(&self) -> Option<Box<Value>> {
+    fn car(&self) -> Box<Value> {
         match self.clone() {
-            List::Cell(head, _) => Some(head),
-            _ => None,
+            List::Cell(head, _) => head,
+            _ => panic!("Tried to CAR an empty list"),
         }
     }
 
@@ -51,10 +51,10 @@ impl List {
     }
 
     fn nth(self, n: u64) -> Value {
-        let mut value = self.car().unwrap();
+        let mut value = self.car();
         let mut rest = self.cdr();
         for i in 0..n {
-            value = rest.car().unwrap();
+            value = rest.car();
             rest = rest.cdr();
         }
         *value
@@ -80,8 +80,8 @@ impl List {
         let mut res: Vec<_> = vec![];
         let mut cur = self.clone();
 
-        while cur != List::Null {
-            res.push(*cur.car().unwrap());
+        while !cur.is_empty() {
+            res.push(*cur.car());
             cur = *cur.cdr();
         }
         res
@@ -92,6 +92,13 @@ impl List {
         F: FnMut(Value) -> Value,
     {
         List::from_vec(self.as_vec().into_iter().map(f).collect::<Vec<_>>())
+    }
+
+    fn is_empty(&self) -> bool {
+        match self.clone() {
+            List::Null => true,
+            _ => false,
+        }
     }
 }
 
@@ -104,13 +111,8 @@ impl fmt::Display for List {
     }
 }
 
-#[cfg(test)]
-mod test {
-    fn test_create_list() -> () {}
-}
-
-#[derive(PartialEq, Clone, Debug)]
-enum Procedure {
+#[derive(Clone, Debug)]
+enum Proc {
     Builtin(String),
     Function {
         argnames: Vec<String>,
@@ -119,21 +121,31 @@ enum Procedure {
     },
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum Value {
     Integer(i64),
     Boolean(bool),
     String(String),
     Symbol(String),
     List(List),
-    Procedure(Procedure),
+    Procedure(Proc),
     SpecialForm(SpecialForm),
 }
 
-#[derive(PartialEq, Clone, Debug)]
-pub struct Environment {
-    parent: Option<Rc<Environment>>,
-    values: HashMap<String, Value>,
+impl Value {
+    fn as_list(&self) -> List {
+        match self {
+            Value::List(list) => list.clone(),
+            _ => panic!("Cannot convert {:?} to List", self),
+        }
+    }
+
+    fn symbol_to_string(&self) -> String {
+        match self {
+            Value::Symbol(sym) => sym.clone(),
+            _ => panic!("Cannot get string from non-Symbol {:?}", self),
+        }
+    }
 }
 
 fn reduce<F>(f: F, args: List) -> Value
@@ -150,51 +162,77 @@ where
     )
 }
 
+type Mapping = HashMap<String, Value>;
+
+#[derive(Clone, Debug)]
+struct Environment {
+    mappings: VecDeque<Mapping>,
+}
+
 impl Environment {
-    fn new(parent: Option<Rc<Environment>>, values: HashMap<String, Value>) -> Environment {
-        let mut env = Environment { parent, values };
-        env.define("+", Value::Procedure(Procedure::Builtin("+".to_string())));
-        env.define("-", Value::Procedure(Procedure::Builtin("-".to_string())));
-        env.define("*", Value::Procedure(Procedure::Builtin("*".to_string())));
-        env.define("/", Value::Procedure(Procedure::Builtin("/".to_string())));
-        env
+    fn new() -> Environment {
+        let mut res = Environment {
+            mappings: VecDeque::new(),
+        };
+
+        res.define("+", Value::Procedure(Proc::Builtin("+".to_string())));
+        res.define("-", Value::Procedure(Proc::Builtin("-".to_string())));
+        res.define("*", Value::Procedure(Proc::Builtin("*".to_string())));
+        res.define("/", Value::Procedure(Proc::Builtin("/".to_string())));
+
+        res
+    }
+
+    fn new_child(self) -> Self {
+        let mut mapping = Mapping::new();
+        mapping.insert(
+            "+".to_string(),
+            Value::Procedure(Proc::Builtin("+".to_string())),
+        );
+        mapping.insert(
+            "-".to_string(),
+            Value::Procedure(Proc::Builtin("-".to_string())),
+        );
+        mapping.insert(
+            "*".to_string(),
+            Value::Procedure(Proc::Builtin("*".to_string())),
+        );
+        mapping.insert(
+            "/".to_string(),
+            Value::Procedure(Proc::Builtin("/".to_string())),
+        );
+        let mut mappings = self.mappings.clone();
+        mappings.push_front(mapping);
+        Environment { mappings }
     }
 
     fn define(&mut self, name: &str, value: Value) -> () {
-        self.values.insert(name.to_string(), value);
+        self.mappings[0].insert(name.to_string(), value);
     }
 
-    fn retrieve(self, name: String) -> Value {
-        let msg = format!("name {:?} not in scope", &name);
-        self.values.get(&name).expect(&msg).clone()
-    }
-
-    fn parent(self) -> Option<Rc<Environment>> {
-        self.parent
-    }
-
-    fn new_child(self) -> Environment {
-        Environment::new(Some(Rc::new(self)), HashMap::new())
-    }
-
-    fn empty() -> Environment {
-        Environment::new(None, HashMap::new())
+    fn retrieve(&self, name: String) -> &Value {
+        for mapping in self.mappings.iter() {
+            if let Some(value) = mapping.get(&name) {
+                return value;
+            }
+        }
+        panic!("Couldn't find {} in scope", name)
     }
 
     fn add(args: List) -> Value {
-        reduce(|lhs, rhs| lhs + rhs, args)
+        reduce(Add::add, args)
     }
 
     fn sub(args: List) -> Value {
-        reduce(|lhs, rhs| lhs - rhs, args)
+        reduce(Sub::sub, args)
     }
 
     fn mul(args: List) -> Value {
-        reduce(|lhs, rhs| lhs * rhs, args)
+        reduce(Mul::mul, args)
     }
 
     fn div(args: List) -> Value {
-        reduce(|lhs, rhs| lhs / rhs, args)
+        reduce(Div::div, args)
     }
 }
 
@@ -236,10 +274,10 @@ macro_rules! bool_ {
     [$value:expr] => { Value::Boolean($value) }
 }
 
-fn apply(f: Procedure, args: List, env: &mut Environment) -> Value {
+fn apply(f: Proc, args: List, env: &mut Environment) -> Value {
     let evaluated_arguments = args.map(|arg: Value| eval(arg, env));
     match f {
-        Procedure::Builtin(name) => match &name[..] {
+        Proc::Builtin(name) => match &name[..] {
             "+" => Environment::add(evaluated_arguments),
             "-" => Environment::sub(evaluated_arguments),
             "*" => Environment::mul(evaluated_arguments),
@@ -262,21 +300,30 @@ fn evaluate_if(expr: Value, list: List, env: &mut Environment) -> Value {
 }
 
 fn evaluate_define(expr: Value, args: List, env: &mut Environment) -> Value {
-    let mut def_env = env.new_child();
-    let func_name = match args.clone().nth(1) {
-        Value::Symbol(name) => name,
-        _ => panic!(),
-    };
-    let argnames = args.cdr().car().unwrap().as_list().as_vec().map(|x| match x { Value::Symbol(n) => n, _ => panic!() });
-    let funcbody = args.cdr().cdr();
-    env.define(&func_name, Value::Procedure(Procedure::Function { argnames: arg}));
+    let signature = args.cdr().car().as_list();
+    let funcname = signature.car().symbol_to_string();
+    let argnames = signature
+        .cdr()
+        .as_vec()
+        .iter()
+        .map(Value::symbol_to_string)
+        .collect::<Vec<_>>();
+    let body = args.cdr().cdr();
+    env.define(
+        &funcname,
+        Value::Procedure(Proc::Function {
+            argnames: argnames,
+            body: *body.clone(),
+            env: env.new_child(),
+        }),
+    );
     List::Null.as_value()
 }
 
 fn eval(expr: Value, env: &mut Environment) -> Value {
     match expr {
         Value::Integer(val) => Value::Integer(val),
-        Value::Symbol(name) => env.clone().retrieve(name),
+        Value::Symbol(name) => *env.clone().retrieve(name),
         Value::List(ref list) => {
             let first = eval(list.clone().nth(0), env);
             match first {
@@ -299,21 +346,11 @@ mod tests {
 
     #[test]
     fn test_eval_arith() -> () {
-        let mut env = Environment::empty();
+        let mut env = Environment::new();
         env.define("a", int![1]);
         env.define("b", int![42]);
         let cond = list![sym!["+"], sym!["a"], sym!["b"]];
         assert_eq!(eval(cond, &mut env), Value::Integer(43));
-    }
-
-    #[test]
-    fn test_eval_define() -> () {
-        let mut env = Environment::empty();
-        let expr = list![
-            spec![Define],
-            list![sym!["x"]],
-            list![sym!["+"], sym!["a"], sym!["a"]]
-        ];
     }
 }
 
